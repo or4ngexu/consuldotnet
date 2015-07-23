@@ -371,6 +371,7 @@ namespace Consul.Test
             Assert.IsNotNull(getRequest.Response);
             Assert.AreEqual(id, getRequest.Response.Session);
             Assert.AreEqual(getRequest.Response.LockIndex, (ulong)1);
+            Assert.IsTrue(StructuralComparisons.StructuralEqualityComparer.Equals(value, getRequest.Response.Value));
             Assert.IsTrue(getRequest.LastIndex > 0);
 
             acquireRequest = client.KV.Release(pair);
