@@ -14,7 +14,7 @@ namespace Consul.Test.Exec
         public void ExecCommandRun()
         {
 
-            var rexec = new ExecCommand(new rExecConf() { Cmd = "echo hi"}, CancellationToken.None);
+            var rexec = new ExecCommand(new RemoteExecutionConfiguration() { Cmd = "echo hi"}, CancellationToken.None);
 
             rexec.Run();
             Task.Delay(1000).Wait();

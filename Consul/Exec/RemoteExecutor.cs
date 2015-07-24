@@ -8,18 +8,20 @@ using Consul;
 using Newtonsoft.Json;
 using System.Threading;
 using System.IO;
+using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace Consul.Exec
 {
     // rExecConf is used to pass around configuration
-    public class rExecConf
+    public class RemoteExecutionConfiguration
     {
         public string Datacenter { get; set; }
         public string Prefix { get; set; }
         public string Token { get; set; }
-        public bool ForeignDC { get; set; }
-        public string LocalDC { get; set; }
-        public string LocalNode { get; set; }
+        public bool ForeignDC { get; internal set; }
+        public string LocalDC { get; internal set; }
+        public string LocalNode { get; internal set; }
         public string Node { get; set; }
         public string Service { get; set; }
         public string Tag { get; set; }
@@ -30,7 +32,7 @@ namespace Consul.Exec
         public string Cmd { get; set; }
         public byte[] Script { get; set; }
         public bool Verbose { get; set; }
-        public rExecConf()
+        public RemoteExecutionConfiguration()
         {
             Prefix = RemoteExecutor.rExecPrefix;
             ReplWait = RemoteExecutor.rExecReplicationWait;
@@ -39,6 +41,10 @@ namespace Consul.Exec
         }
     }
 
+    internal abstract class RemoteExecutionResult
+    {
+        public string Node { get; set; }
+    }
     // rExecEvent is the event we broadcast using a user-event
     internal class rExecEvent
     {
@@ -60,25 +66,21 @@ namespace Consul.Exec
         public TimeSpan Wait { get; set; }
     }
     // rExecAck is used to transmit an acknowledgement
-    internal class rExecAck
+    internal class RemoteExectionAcknowledgement : RemoteExecutionResult
     {
-        public string Node { get; set; }
     }
     // rExecHeart is used to transmit a heartbeat
-    internal class rExecHeart
+    internal class RemoteExecutionHeartbeat : RemoteExecutionResult
     {
-        public string Node { get; set; }
     }
     // rExecOutput is used to transmit a chunk of output
-    internal class rExecOutput
+    internal class RemoteExecutionOutput : RemoteExecutionResult
     {
-        public string Node { get; set; }
         public byte[] Output { get; set; }
     }
     // rExecExit is used to transmit an exit code
-    internal class rExecExit
+    internal class RemoteExecutionExit : RemoteExecutionResult
     {
-        public string Node { get; set; }
         public int Code { get; set; }
     }
     // ExecCommand is a Command implementation that is used to
@@ -87,12 +89,12 @@ namespace Consul.Exec
     {
         CancellationTokenSource cts;
         public CancellationToken Shutdown { get; private set; }
-        public rExecConf Conf { get; private set; }
+        public RemoteExecutionConfiguration Conf { get; private set; }
         Client client { get; set; }
         public string SessionID { get; private set; }
-        public ExecCommand(rExecConf config, CancellationToken ct) :
+        public ExecCommand(RemoteExecutionConfiguration config, CancellationToken ct) :
             this(config, new Client(), ct) { }
-        public ExecCommand(rExecConf config, Client client, CancellationToken ct)
+        public ExecCommand(RemoteExecutionConfiguration config, Client client, CancellationToken ct)
         {
             Conf = config;
             this.client = client;
@@ -151,7 +153,143 @@ namespace Consul.Exec
 
         private void waitForJob()
         {
-            throw new NotImplementedException();
+            try
+            {
+                var start = DateTime.UtcNow;
+                int ackCount = 0,
+                    exitCount = 0,
+                    badExit = 0;
+
+
+                var resultsChannel = new BlockingCollection<RemoteExecutionResult>(new ConcurrentQueue<RemoteExecutionResult>(), 128);
+                using (var done = CancellationTokenSource.CreateLinkedTokenSource(cts.Token))
+                {
+                    var streamTask = Task.Run(() => streamResults(done.Token, resultsChannel));
+
+                    RemoteExecutionResult result;
+                    bool gotResult;
+
+                    var waiter = Task.Delay((int)Conf.Wait.TotalMilliseconds * 2, done.Token);
+
+                    do
+                    {
+                        var waitTime = (int)Conf.Wait.TotalMilliseconds;
+                        if (ackCount > exitCount)
+                            waitTime *= 2;
+                        gotResult = resultsChannel.TryTake(out result, waitTime, done.Token);
+
+                        if (gotResult)
+                        {
+                            waiter = Task.Delay(waitTime, done.Token);
+                            if (result.GetType() == typeof(RemoteExectionAcknowledgement))
+                            {
+                                ackCount++;
+                            }
+                            if (result.GetType() == typeof(RemoteExecutionHeartbeat))
+                            {
+                            }
+                            if (result.GetType() == typeof(RemoteExecutionOutput))
+                            {
+                                Trace.WriteLine(System.Text.Encoding.UTF8.GetString(((RemoteExecutionOutput)result).Output));
+                            }
+                            if (result.GetType() == typeof(RemoteExecutionExit))
+                            {
+                                exitCount++;
+                                if (((RemoteExecutionExit)result).Code > 0)
+                                {
+                                    badExit++;
+                                }
+                            }
+                        }
+                    } while (!waiter.IsCompleted);
+
+                    if (waiter.IsCompleted)
+                    {
+                        done.Cancel();
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                //Ignore during shutdown
+            }
+            finally
+            {
+                // Although the session destroy is already deferred, we do it again here,
+                // because invalidation of the session before destroyData() ensures there is
+                // no race condition allowing an agent to upload data (the acquire will fail).
+                if (!string.IsNullOrEmpty(SessionID))
+                {
+                    client.Session.Destroy(SessionID);
+                }
+            }
+        }
+
+        private void streamResults(CancellationToken done, BlockingCollection<RemoteExecutionResult> results)
+        {
+            var opts = new QueryOptions
+            {
+                WaitTime = Conf.Wait
+            };
+            var dir = string.Join("/", Conf.Prefix, SessionID) + "/";
+            var seen = new HashSet<string>();
+
+            while (!done.IsCancellationRequested)
+            {
+                var keys = client.KV.Keys(dir, "", opts, done);
+
+                if (keys.LastIndex == opts.WaitIndex)
+                    continue;
+
+                opts.WaitIndex = keys.LastIndex;
+
+                foreach (var key in keys.Response)
+                {
+                    if (seen.Contains(key))
+                        continue;
+
+                    seen.Add(key);
+
+                    var keyName = key.Replace(dir, string.Empty);
+
+                    if (keyName == RemoteExecutor.rExecFileName)
+                    {
+                        continue;
+                    }
+                    else if (keyName.EndsWith(RemoteExecutor.rExecAckSuffix))
+                    {
+                        results.Add(new RemoteExectionAcknowledgement { Node = keyName.Replace(RemoteExecutor.rExecAckSuffix, string.Empty) }, done);
+                    }
+                    else if (keyName.EndsWith(RemoteExecutor.rExecExitSuffix))
+                    {
+                        var pair = client.KV.Get(key).Response;
+
+                        var code = Convert.ToInt32(System.Text.Encoding.UTF8.GetString(pair.Value));
+
+                        results.Add(new RemoteExecutionExit { Node = keyName.Replace(RemoteExecutor.rExecExitSuffix, string.Empty), Code = code }, done);
+                    }
+                    else if (key.LastIndexOf(RemoteExecutor.rExecOutputDivider) != -1)
+                    {
+                        var pair = client.KV.Get(key).Response;
+                        var idx = key.LastIndexOf(RemoteExecutor.rExecOutputDivider);
+
+                        var node = key.Substring(0, idx);
+
+                        if (pair.Value.Length == 0)
+                        {
+                            results.Add(new RemoteExecutionHeartbeat { Node = node }, done);
+                        }
+                        else
+                        {
+                            results.Add(new RemoteExecutionOutput { Node = node, Output = pair.Value }, done);
+                        }
+                    }
+                    else
+                    {
+                        continue;
+                    }
+                }
+            }
         }
 
         private string fireEvent()
@@ -232,7 +370,7 @@ namespace Consul.Exec
             return client.Session.CreateNoChecks(se).Response;
         }
 
-        private void validate(rExecConf config)
+        private void validate(RemoteExecutionConfiguration config)
         {
             var exceptions = new List<Exception>();
             if ((config.Script == null || config.Script.Length == 0) && string.IsNullOrEmpty(config.Cmd))
