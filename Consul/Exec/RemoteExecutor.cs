@@ -13,7 +13,7 @@ using System.Diagnostics;
 
 namespace Consul.Exec
 {
-    // rExecConf is used to pass around configuration
+    // RemoteExecutionConfiguration is used to pass around configuration
     public class RemoteExecutionConfiguration
     {
         public string Datacenter { get; set; }
@@ -31,13 +31,11 @@ namespace Consul.Exec
         public TimeSpan ReplWait { get; set; }
         public string Cmd { get; set; }
         public byte[] Script { get; set; }
-        public bool Verbose { get; set; }
         public RemoteExecutionConfiguration()
         {
-            Prefix = RemoteExecutor.rExecPrefix;
-            ReplWait = RemoteExecutor.rExecReplicationWait;
-            Wait = RemoteExecutor.rExecQuietWait;
-            Verbose = false;
+            Prefix = "_rexec";
+            ReplWait = TimeSpan.FromMilliseconds(200);
+            Wait = TimeSpan.FromSeconds(2);
         }
     }
 
@@ -46,14 +44,14 @@ namespace Consul.Exec
         public string Node { get; set; }
     }
     // rExecEvent is the event we broadcast using a user-event
-    internal class rExecEvent
+    internal class RemoteExecutionEvent
     {
         public string Prefix { get; set; }
         public string Session { get; set; }
     }
     // rExecSpec is the file we upload to specify the parameters
     // of the remote execution.
-    internal class rExecSpec
+    internal class RemoteExecutionSpecification
     {
         // Command is a single command to run directly in the shell
         [JsonProperty(NullValueHandling = NullValueHandling.Ignore)]
@@ -83,50 +81,65 @@ namespace Consul.Exec
     {
         public int Code { get; set; }
     }
-    // ExecCommand is a Command implementation that is used to
-    // do remote execution of commands
-    public class ExecCommand
+    public class RemoteExecutionJob
     {
+        // rExecFileName is the name of the file we append to
+        // the path, e.g. _rexec/session_id/job
+        const string _rExecFileName = "job";
+        // rExecAck is the suffix added to an ack path
+        const string _rExecAckSuffix = "/ack";
+        // rExecAck is the suffix added to an exit code
+        const string _rExecExitSuffix = "/exit";
+        // rExecOutputDivider is used to namespace the output
+        const string _rExecOutputDivider = "/out/";
+        // rExecTTL is how long we default the session TTL to
+        static readonly TimeSpan _rExecTTL = TimeSpan.FromSeconds(15);
+        // rExecRenewInterval is how often we renew the session TTL
+        // when doing an exec in a foreign DC.
+        static readonly TimeSpan _rExecRenewInterval = TimeSpan.FromSeconds(5);
+
+        Client _client;
         CancellationTokenSource cts;
-        public CancellationToken Shutdown { get; private set; }
-        public RemoteExecutionConfiguration Conf { get; private set; }
-        Client client { get; set; }
+        CancellationToken _shutdown;
+        public RemoteExecutionConfiguration Configuration { get; private set; }
+
         public string SessionID { get; private set; }
-        public ExecCommand(RemoteExecutionConfiguration config, CancellationToken ct) :
+        public RemoteExecutionJob(RemoteExecutionConfiguration config, CancellationToken ct) :
             this(config, new Client(), ct) { }
-        public ExecCommand(RemoteExecutionConfiguration config, Client client, CancellationToken ct)
+        public RemoteExecutionJob(RemoteExecutionConfiguration config, Client client, CancellationToken ct)
         {
-            Conf = config;
-            this.client = client;
-            Shutdown = ct;
             validate(config);
+            Configuration = config;
+            _client = client;
+            _shutdown = ct;
         }
 
         public void Run()
         {
-            using (cts = CancellationTokenSource.CreateLinkedTokenSource(Shutdown))
+            _shutdown.ThrowIfCancellationRequested();
+            using (cts = CancellationTokenSource.CreateLinkedTokenSource(_shutdown))
             {
                 try
                 {
-                    var selfRequest = client.Agent.Self();
+                    var selfRequest = _client.Agent.Self();
                     var info = selfRequest.Response;
                     var didUpload = false;
 
-                    if (!string.IsNullOrEmpty(Conf.Datacenter) && Conf.Datacenter != info["Config"]["Datacenter"].ToString())
+                    if (!string.IsNullOrEmpty(Configuration.Datacenter) && Configuration.Datacenter != info["Config"]["Datacenter"].ToString())
                     {
                         // Remote exec in foreign datacenter, using Session TTL
-                        Conf.ForeignDC = true;
-                        Conf.LocalDC = info["Config"]["Datacenter"].ToString();
-                        Conf.LocalNode = info["Config"]["NodeName"].ToString();
+                        Configuration.ForeignDC = true;
+                        Configuration.LocalDC = info["Config"]["Datacenter"].ToString();
+                        Configuration.LocalNode = info["Config"]["NodeName"].ToString();
                     }
-                    var spec = JsonConvert.SerializeObject(new rExecSpec() { Command = Conf.Cmd, Script = Conf.Script, Wait = Conf.Wait });
+                    var spec = JsonConvert.SerializeObject(new RemoteExecutionSpecification() { Command = Configuration.Cmd, Script = Configuration.Script, Wait = Configuration.Wait });
                     try
                     {
                         SessionID = createSession();
 
                         didUpload = uploadPayload(System.Text.Encoding.UTF8.GetBytes(spec));
 
-                        Task.Delay(Conf.ReplWait, cts.Token).Wait();
+                        Task.Delay(Configuration.ReplWait, cts.Token).Wait();
 
                         var eventId = fireEvent();
 
@@ -136,11 +149,11 @@ namespace Consul.Exec
                     {
                         if (!string.IsNullOrEmpty(SessionID))
                         {
-                            client.Session.Destroy(SessionID);
+                            _client.Session.Destroy(SessionID);
                         }
                         if (didUpload)
                         {
-                            client.KV.DeleteTree(string.Join("/", Conf.Prefix, SessionID));
+                            _client.KV.DeleteTree(string.Join("/", Configuration.Prefix, SessionID));
                         }
                     }
                 }
@@ -169,11 +182,11 @@ namespace Consul.Exec
                     RemoteExecutionResult result;
                     bool gotResult;
 
-                    var waiter = Task.Delay((int)Conf.Wait.TotalMilliseconds * 2, done.Token);
+                    var waiter = Task.Delay((int)Configuration.Wait.TotalMilliseconds * 2, done.Token);
 
                     do
                     {
-                        var waitTime = (int)Conf.Wait.TotalMilliseconds;
+                        var waitTime = (int)Configuration.Wait.TotalMilliseconds;
                         if (ackCount > exitCount)
                             waitTime *= 2;
                         gotResult = resultsChannel.TryTake(out result, waitTime, done.Token);
@@ -220,7 +233,7 @@ namespace Consul.Exec
                 // no race condition allowing an agent to upload data (the acquire will fail).
                 if (!string.IsNullOrEmpty(SessionID))
                 {
-                    client.Session.Destroy(SessionID);
+                    _client.Session.Destroy(SessionID);
                 }
             }
         }
@@ -229,14 +242,14 @@ namespace Consul.Exec
         {
             var opts = new QueryOptions
             {
-                WaitTime = Conf.Wait
+                WaitTime = Configuration.Wait
             };
-            var dir = string.Join("/", Conf.Prefix, SessionID) + "/";
+            var dir = string.Join("/", Configuration.Prefix, SessionID) + "/";
             var seen = new HashSet<string>();
 
             while (!done.IsCancellationRequested)
             {
-                var keys = client.KV.Keys(dir, "", opts, done);
+                var keys = _client.KV.Keys(dir, "", opts, done);
 
                 if (keys.LastIndex == opts.WaitIndex)
                     continue;
@@ -252,26 +265,26 @@ namespace Consul.Exec
 
                     var keyName = key.Replace(dir, string.Empty);
 
-                    if (keyName == RemoteExecutor.rExecFileName)
+                    if (keyName == _rExecFileName)
                     {
                         continue;
                     }
-                    else if (keyName.EndsWith(RemoteExecutor.rExecAckSuffix))
+                    else if (keyName.EndsWith(_rExecAckSuffix))
                     {
-                        results.Add(new RemoteExectionAcknowledgement { Node = keyName.Replace(RemoteExecutor.rExecAckSuffix, string.Empty) }, done);
+                        results.Add(new RemoteExectionAcknowledgement { Node = keyName.Replace(_rExecAckSuffix, string.Empty) }, done);
                     }
-                    else if (keyName.EndsWith(RemoteExecutor.rExecExitSuffix))
+                    else if (keyName.EndsWith(_rExecExitSuffix))
                     {
-                        var pair = client.KV.Get(key).Response;
+                        var pair = _client.KV.Get(key).Response;
 
                         var code = Convert.ToInt32(System.Text.Encoding.UTF8.GetString(pair.Value));
 
-                        results.Add(new RemoteExecutionExit { Node = keyName.Replace(RemoteExecutor.rExecExitSuffix, string.Empty), Code = code }, done);
+                        results.Add(new RemoteExecutionExit { Node = keyName.Replace(_rExecExitSuffix, string.Empty), Code = code }, done);
                     }
-                    else if (key.LastIndexOf(RemoteExecutor.rExecOutputDivider) != -1)
+                    else if (key.LastIndexOf(_rExecOutputDivider) != -1)
                     {
-                        var pair = client.KV.Get(key).Response;
-                        var idx = key.LastIndexOf(RemoteExecutor.rExecOutputDivider);
+                        var pair = _client.KV.Get(key).Response;
+                        var idx = key.LastIndexOf(_rExecOutputDivider);
 
                         var node = key.Substring(0, idx);
 
@@ -294,9 +307,9 @@ namespace Consul.Exec
 
         private string fireEvent()
         {
-            var msg = new rExecEvent()
+            var msg = new RemoteExecutionEvent()
             {
-                Prefix = Conf.Prefix,
+                Prefix = Configuration.Prefix,
                 Session = SessionID
             };
             var buf = JsonConvert.SerializeObject(msg);
@@ -304,22 +317,22 @@ namespace Consul.Exec
             {
                 Name = "_rexec",
                 Payload = System.Text.Encoding.UTF8.GetBytes(buf),
-                NodeFilter = Conf.Node,
-                ServiceFilter = Conf.Service,
-                TagFilter = Conf.Tag
+                NodeFilter = Configuration.Node,
+                ServiceFilter = Configuration.Service,
+                TagFilter = Configuration.Tag
             };
-            return client.Event.Fire(ev).Response;
+            return _client.Event.Fire(ev).Response;
         }
 
         private bool uploadPayload(byte[] spec)
         {
-            var pair = new KVPair(string.Join("/", Conf.Prefix, SessionID, RemoteExecutor.rExecFileName))
+            var pair = new KVPair(string.Join("/", Configuration.Prefix, SessionID, _rExecFileName))
             {
                 Value = spec,
                 Session = SessionID
             };
 
-            if (!client.KV.Acquire(pair).Response)
+            if (!_client.KV.Acquire(pair).Response)
             {
                 throw new LockNotHeldException("failed to acquire key " + pair.Key);
             }
@@ -329,7 +342,7 @@ namespace Consul.Exec
         private string createSession()
         {
             string id;
-            if (Conf.ForeignDC)
+            if (Configuration.ForeignDC)
             {
                 id = createSessionForeign();
             }
@@ -337,7 +350,7 @@ namespace Consul.Exec
             {
                 id = createSessionLocal();
             }
-            client.Session.RenewPeriodic(RemoteExecutor.rExecTTL, id, cts.Token);
+            _client.Session.RenewPeriodic(_rExecTTL, id, cts.Token);
             return id;
         }
 
@@ -347,14 +360,14 @@ namespace Consul.Exec
             {
                 Name = "Remote Exec",
                 Behavior = SessionBehavior.Delete,
-                TTL = RemoteExecutor.rExecTTL
+                TTL = _rExecTTL
             };
-            return client.Session.Create(se).Response;
+            return _client.Session.Create(se).Response;
         }
 
         private string createSessionForeign()
         {
-            var services = client.Health.Service("consul", "", true).Response;
+            var services = _client.Health.Service("consul", "", true).Response;
             if (services.Length == 0)
             {
                 throw new InvalidOperationException("Failed to find Consul server in remote datacenter");
@@ -362,12 +375,12 @@ namespace Consul.Exec
             var node = services[0].Node.Name;
             var se = new SessionEntry
             {
-                Name = string.Format("Remote Exec via {0}@{1}", Conf.LocalNode, Conf.LocalDC),
+                Name = string.Format("Remote Exec via {0}@{1}", Configuration.LocalNode, Configuration.LocalDC),
                 Node = node,
                 Behavior = SessionBehavior.Delete,
-                TTL = RemoteExecutor.rExecTTL
+                TTL = _rExecTTL
             };
-            return client.Session.CreateNoChecks(se).Response;
+            return _client.Session.CreateNoChecks(se).Response;
         }
 
         private void validate(RemoteExecutionConfiguration config)
@@ -423,31 +436,5 @@ namespace Consul.Exec
                 throw new AggregateException("Remote execution configuration validation failed", exceptions);
             }
         }
-    }
-
-    public class RemoteExecutor
-    {
-        // rExecPrefix is the prefix in the KV store used to
-        // store the remote exec data
-        internal const string rExecPrefix = "_rexec";
-        // rExecFileName is the name of the file we append to
-        // the path, e.g. _rexec/session_id/job
-        internal const string rExecFileName = "job";
-        // rExecAck is the suffix added to an ack path
-        internal const string rExecAckSuffix = "/ack";
-        // rExecAck is the suffix added to an exit code
-        internal const string rExecExitSuffix = "/exit";
-        // rExecOutputDivider is used to namespace the output
-        internal const string rExecOutputDivider = "/out/";
-        // rExecReplicationWait is how long we wait for replication
-        internal static readonly TimeSpan rExecReplicationWait = TimeSpan.FromMilliseconds(200);
-        // rExecQuietWait is how long we wait for no responses
-        // before assuming the job is done.
-        internal static readonly TimeSpan rExecQuietWait = TimeSpan.FromSeconds(2);
-        // rExecTTL is how long we default the session TTL to
-        internal static readonly TimeSpan rExecTTL = TimeSpan.FromSeconds(15);
-        // rExecRenewInterval is how often we renew the session TTL
-        // when doing an exec in a foreign DC.
-        internal static readonly TimeSpan rExecRenewInterval = TimeSpan.FromSeconds(5);
     }
 }
