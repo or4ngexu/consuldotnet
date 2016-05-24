@@ -20,6 +20,7 @@ using System.Globalization;
 using System.Linq;
 using Newtonsoft.Json;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace Consul
 {
@@ -46,16 +47,16 @@ namespace Consul
             internal string ID { get; set; }
         }
 
-        private readonly Client _client;
+        private readonly ConsulClient _client;
 
-        internal Event(Client c)
+        internal Event(ConsulClient c)
         {
             _client = c;
         }
 
-        public WriteResult<string> Fire(UserEvent ue)
+        public Task<WriteResult<string>> Fire(UserEvent ue)
         {
-            return Fire(ue, WriteOptions.Empty);
+            return Fire(ue, WriteOptions.Default);
         }
 
         /// <summary>
@@ -64,11 +65,9 @@ namespace Consul
         /// <param name="ue">A User Event definition</param>
         /// <param name="q">Customized write options</param>
         /// <returns></returns>
-        public WriteResult<string> Fire(UserEvent ue, WriteOptions q)
+        public async Task<WriteResult<string>> Fire(UserEvent ue, WriteOptions q)
         {
-            var req =
-                _client.CreateWrite<byte[], EventCreationResult>(string.Format("/v1/event/fire/{0}", ue.Name),
-                    ue.Payload, q);
+            var req = _client.Put<byte[], EventCreationResult>(string.Format("/v1/event/fire/{0}", ue.Name), ue.Payload, q);
             if (!string.IsNullOrEmpty(ue.NodeFilter))
             {
                 req.Params["node"] = ue.NodeFilter;
@@ -81,20 +80,15 @@ namespace Consul
             {
                 req.Params["tag"] = ue.TagFilter;
             }
-            var res = req.Execute();
-            var ret = new WriteResult<string>()
-            {
-                RequestTime = res.RequestTime,
-                Response = res.Response.ID
-            };
-            return ret;
+            var res = await req.Execute().ConfigureAwait(false);
+            return new WriteResult<string>(res, res.Response.ID);
         }
 
         /// <summary>
         /// List is used to get the most recent events an agent has received. This list can be optionally filtered by the name. This endpoint supports quasi-blocking queries. The index is not monotonic, nor does it provide provide LastContact or KnownLeader.
         /// </summary>
         /// <returns>An array of events</returns>
-        public QueryResult<UserEvent[]> List()
+        public Task<QueryResult<UserEvent[]>> List()
         {
             return List(string.Empty, QueryOptions.Default);
         }
@@ -104,7 +98,7 @@ namespace Consul
         /// </summary>
         /// <param name="name">The name of the event to filter for</param>
         /// <returns>An array of events</returns>
-        public QueryResult<UserEvent[]> List(string name)
+        public Task<QueryResult<UserEvent[]>> List(string name)
         {
             return List(name, QueryOptions.Default, CancellationToken.None);
         }
@@ -115,7 +109,7 @@ namespace Consul
         /// <param name="name">The name of the event to filter for</param>
         /// <param name="q">Customized query options</param>
         /// <returns>An array of events</returns>
-        public QueryResult<UserEvent[]> List(string name, QueryOptions q)
+        public Task<QueryResult<UserEvent[]>> List(string name, QueryOptions q)
         {
             return List(name, q, CancellationToken.None);
         }
@@ -127,9 +121,9 @@ namespace Consul
         /// <param name="q">Customized query options</param>
         /// <param name="ct">Cancellation token for long poll request. If set, OperationCanceledException will be thrown if the request is cancelled before completing</param>
         /// <returns>An array of events</returns>
-        public QueryResult<UserEvent[]> List(string name, QueryOptions q, CancellationToken ct)
+        public Task<QueryResult<UserEvent[]>> List(string name, QueryOptions q, CancellationToken ct)
         {
-            var req = _client.CreateQuery<UserEvent[]>("/v1/event/list", q);
+            var req = _client.Get<UserEvent[]>("/v1/event/list", q);
             if (!string.IsNullOrEmpty(name))
             {
                 req.Params["name"] = name;
@@ -152,7 +146,7 @@ namespace Consul
         }
     }
 
-    public partial class Client : IConsulClient
+    public partial class ConsulClient : IConsulClient
     {
         private Event _event;
 

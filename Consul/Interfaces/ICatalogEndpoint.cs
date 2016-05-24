@@ -1,24 +1,27 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
+
 namespace Consul
 {
     public interface ICatalogEndpoint
     {
-        QueryResult<string[]> Datacenters();
-        WriteResult Deregister(CatalogDeregistration reg);
-        WriteResult Deregister(CatalogDeregistration reg, WriteOptions q);
-        QueryResult<CatalogNode> Node(string node);
-        QueryResult<CatalogNode> Node(string node, QueryOptions q);
-        QueryResult<Node[]> Nodes();
-        QueryResult<Node[]> Nodes(QueryOptions q);
-        QueryResult<Node[]> Nodes(QueryOptions q, CancellationToken ct);
-        WriteResult Register(CatalogRegistration reg);
-        WriteResult Register(CatalogRegistration reg, WriteOptions q);
-        QueryResult<CatalogService[]> Service(string service);
-        QueryResult<CatalogService[]> Service(string service, string tag);
-        QueryResult<CatalogService[]> Service(string service, string tag, QueryOptions q);
-        QueryResult<System.Collections.Generic.Dictionary<string, string[]>> Services();
-        QueryResult<System.Collections.Generic.Dictionary<string, string[]>> Services(QueryOptions q);
-        QueryResult<System.Collections.Generic.Dictionary<string, string[]>> Services(QueryOptions q, CancellationToken ct);
+        Task<QueryResult<string[]>> Datacenters();
+        Task<WriteResult> Deregister(CatalogDeregistration reg);
+        Task<WriteResult> Deregister(CatalogDeregistration reg, WriteOptions q);
+        Task<QueryResult<CatalogNode>> Node(string node);
+        Task<QueryResult<CatalogNode>> Node(string node, QueryOptions q);
+        Task<QueryResult<Node[]>> Nodes();
+        Task<QueryResult<Node[]>> Nodes(QueryOptions q);
+        Task<QueryResult<Node[]>> Nodes(QueryOptions q, CancellationToken ct);
+        Task<WriteResult> Register(CatalogRegistration reg);
+        Task<WriteResult> Register(CatalogRegistration reg, WriteOptions q);
+        Task<QueryResult<CatalogService[]>> Service(string service);
+        Task<QueryResult<CatalogService[]>> Service(string service, string tag);
+        Task<QueryResult<CatalogService[]>> Service(string service, string tag, QueryOptions q);
+        Task<QueryResult<Dictionary<string, string[]>>> Services();
+        Task<QueryResult<Dictionary<string, string[]>>> Services(QueryOptions q);
+        Task<QueryResult<Dictionary<string, string[]>>> Services(QueryOptions q, CancellationToken ct);
     }
 }

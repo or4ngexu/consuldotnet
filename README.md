@@ -2,7 +2,7 @@
 
 [![Build Status](https://ci.appveyor.com/api/projects/status/github/PlayFab/consuldotnet?branch=master&svg=true)](https://ci.appveyor.com/project/highlyunavailable/consuldotnet)
 
-* Consul API: [v0.5.2](https://github.com/hashicorp/consul/tree/v0.5.2/api)
+* Consul API: [v0.6.4](https://github.com/hashicorp/consul/tree/v0.6.4/api)
 * .NET version: >= 4.5
 
 Consul.NET is a .NET port of the Go Consul API, but reworked to use .NET
@@ -12,6 +12,13 @@ API](https://www.consul.io/docs/agent/http.html), but this API does have
 additional functionality that is provided in the Go API, like Locks and
 Semaphores.
 
+## ⚠️WARNING⚠️
+
+If you are upgrading from Consul.NET 0.5.x or below, the entire API has
+been re-written to be `async` as of 0.6.0. See the
+[Changelog](https://github.com/PlayFab/consuldotnet/blob/master/CHANGELOG.md)
+for more information.
+
 ## Example
 
 You'll need a running Consul Server on your local machine, or a Consul
@@ -20,16 +27,16 @@ Agent connected to a Consul Server cluster. To run a local server:
 1. [Download a copy](https://www.consul.io/downloads.html) of the latest Windows
 version and unzip it into the `Consul.Test` folder.
 2. Open a command prompt and `cd` to the `Consul.Test` folder.
-3. Run `consul.exe agent -config-file test_config.json`
+3. Run `.\consul.exe agent -dev -config-file test_config.json`
 
-This creates a 1-server cluster that writes data to `.\consul-data` and
-listens on `localhost:8500`.
+This creates a 1-server cluster that operates in "dev" mode (does not
+write data to disk) and listens on `127.0.0.1:8500`.
 
 Once Consul is running (you'll see something like `consul: cluster
 leadership acquired`) in your command prompt, then do the following
 steps in your project.
 
-Add a reference to Consul and add a using statement:
+Add a reference to the Consul library and add a using statement:
 
 ```csharp
 using Consul;
@@ -38,30 +45,32 @@ using Consul;
 Write a function to talk to the KV store:
 
 ```csharp
-public static string HelloConsul()
+public static async Task<string> HelloConsul()
 {
-    var client = new Client();
-
-    var putPair = new KVPair("hello")
+    using (var client = new ConsulClient())
     {
-        Value = Encoding.UTF8.GetBytes("Hello Consul")
-    };
+        var putPair = new KVPair("hello")
+        {
+            Value = Encoding.UTF8.GetBytes("Hello Consul")
+        };
 
-    var putAttempt = client.KV.Put(putPair);
+        var putAttempt = await client.KV.Put(putPair);
 
-    if (putAttempt.Response)
-    {
-        var getPair = client.KV.Get("hello");
-        return Encoding.UTF8.GetString(getPair.Response.Value, 0, getPair.Response.Value.Length);
+        if (putAttempt.Response)
+        {
+            var getPair = await client.KV.Get("hello");
+            return Encoding.UTF8.GetString(getPair.Response.Value, 0,
+                getPair.Response.Value.Length);
+        }
+        return "";
     }
-    return "";
 }
 ```
 
 And call it:
 
 ```csharp
-Console.WriteLine(HelloConsul());
+Console.WriteLine(HelloConsul().GetAwaiter().GetResult());
 ```
 
 You should see `Hello Consul` in the output of your program. You should
@@ -78,10 +87,11 @@ The API just went out to Consul, wrote "Hello Consul" under the key
 
 ## Usage
 
-All operations are done using a `Client` object. First, instantiate a
-`Consul.Client` object, which connects to `localhost:8500` - the default
-Consul HTTP API port. Once you've got a `Client` object, various
-functionality is exposed as properties under the `Client`.
+All operations are done using a `ConsulClient` object. First,
+instantiate a `ConsulClient` object, which connects to `localhost:8500`,
+the default Consul HTTP API port. Once you've got a `ConsulClient`
+object, various functionality is exposed as properties under the
+`ConsulClient`.
 
 All responses are wrapped in `QueryResponse` and `WriteResponse`
 classes, which provide metadata about the request, like how long it
@@ -126,6 +136,13 @@ endpoints provide the raw entries.
 The KV endpoint is used to access Consul's simple key/value store,
 useful for storing service configuration or other metadata.
 
+### Query
+
+The Prepared Query endpoints are used to create, update, destroy, and
+execute prepared queries. Prepared queries allow you to register a
+complex service query and then execute it later via its ID or name to
+get a set of healthy nodes that provide a given service.
+
 ### Session
 
 The Session endpoints are used to create, destroy, and query sessions.
@@ -152,3 +169,14 @@ Election](https://consul.io/docs/guides/leader-election.html) guide.
 Semaphore is used to implement a distributed semaphore using the Consul
 KV primitives. It is an implementaiton of the [Consul Semaphore
 ](https://www.consul.io/docs/guides/semaphore.html) guide.
+
+## Using with Mono/DNXCore
+
+This package should work correctly with Mono. It compiles and runs with
+Mono 4.2.3, but if you have any issues using the Nuget package or
+compiling this code with Mono, please file a Github issue with details
+of the problem.
+
+This package is not usable on DNXCore due to a problem with [large
+integer support](https://github.com/JamesNK/Newtonsoft.Json/issues/838)
+in Json.NET. It should work fine on DNX451 targets though.

@@ -19,167 +19,238 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
+using Xunit;
 
 namespace Consul.Test
 {
-    [TestClass]
     public class SessionTest
     {
-        [TestMethod]
-        public void Session_CreateDestroy()
+        [Fact]
+        public async Task Session_CreateDestroy()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create();
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create();
             var id = sessionRequest.Response;
-            Assert.IsTrue(sessionRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsFalse(string.IsNullOrEmpty(sessionRequest.Response));
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
 
-            var destroyRequest = client.Session.Destroy(id);
-            Assert.IsTrue(destroyRequest.Response);
+            var destroyRequest = await client.Session.Destroy(id);
+            Assert.True(destroyRequest.Response);
         }
 
-        [TestMethod]
-        public void Session_CreateNoChecksDestroy()
+        [Fact]
+        public async Task Session_CreateNoChecksDestroy()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.CreateNoChecks();
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.CreateNoChecks();
 
             var id = sessionRequest.Response;
-            Assert.IsTrue(sessionRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsFalse(string.IsNullOrEmpty(sessionRequest.Response));
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
 
-            var destroyRequest = client.Session.Destroy(id);
-            Assert.IsTrue(destroyRequest.Response);
+            var destroyRequest = await client.Session.Destroy(id);
+            Assert.True(destroyRequest.Response);
         }
 
-        [TestMethod]
-        public void Session_CreateRenewDestroy()
+        [Fact]
+        public async Task Session_CreateRenewDestroy()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(10) });
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(10) });
 
             var id = sessionRequest.Response;
-            Assert.IsTrue(sessionRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsFalse(string.IsNullOrEmpty(sessionRequest.Response));
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
 
-            var renewRequest = client.Session.Renew(id);
-            Assert.IsTrue(renewRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsNotNull(renewRequest.Response.ID);
-            Assert.AreEqual(sessionRequest.Response, renewRequest.Response.ID);
-            Assert.AreEqual(renewRequest.Response.TTL.TotalSeconds, TimeSpan.FromSeconds(10).TotalSeconds);
+            var renewRequest = await client.Session.Renew(id);
+            Assert.NotEqual(TimeSpan.Zero, renewRequest.RequestTime);
+            Assert.NotNull(renewRequest.Response.ID);
+            Assert.Equal(sessionRequest.Response, renewRequest.Response.ID);
+            Assert.True(renewRequest.Response.TTL.HasValue);
+            Assert.Equal(renewRequest.Response.TTL.Value.TotalSeconds, TimeSpan.FromSeconds(10).TotalSeconds);
 
-            var destroyRequest = client.Session.Destroy(id);
-            Assert.IsTrue(destroyRequest.Response);
+            var destroyRequest = await client.Session.Destroy(id);
+            Assert.True(destroyRequest.Response);
         }
 
-        [TestMethod]
-        public void Session_Create_RenewPeriodic_Destroy()
+        [Fact]
+        public async Task Session_CreateRenewDestroyRenew()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(10) });
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(10) });
 
             var id = sessionRequest.Response;
-            Assert.IsTrue(sessionRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsFalse(string.IsNullOrEmpty(sessionRequest.Response));
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
+
+            var renewRequest = await client.Session.Renew(id);
+            Assert.NotEqual(TimeSpan.Zero, renewRequest.RequestTime);
+            Assert.NotNull(renewRequest.Response.ID);
+            Assert.Equal(sessionRequest.Response, renewRequest.Response.ID);
+            Assert.Equal(renewRequest.Response.TTL.Value.TotalSeconds, TimeSpan.FromSeconds(10).TotalSeconds);
+
+            var destroyRequest = await client.Session.Destroy(id);
+            Assert.True(destroyRequest.Response);
+
+            try
+            {
+                renewRequest = await client.Session.Renew(id);
+                Assert.True(false, "Session still exists");
+            }
+            catch (SessionExpiredException ex)
+            {
+                Assert.IsType<SessionExpiredException>(ex);
+            }
+        }
+
+        [Fact]
+        public async Task Session_Create_RenewPeriodic_Destroy()
+        {
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(10) });
+
+            var id = sessionRequest.Response;
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
 
             var tokenSource = new CancellationTokenSource();
             var ct = tokenSource.Token;
 
-            client.Session.RenewPeriodic(TimeSpan.FromSeconds(1), id, WriteOptions.Empty, ct);
+            var renewTask = client.Session.RenewPeriodic(TimeSpan.FromSeconds(1), id, WriteOptions.Default, ct);
 
-            tokenSource.CancelAfter(3000);
+            var infoRequest = await client.Session.Info(id);
+            Assert.True(infoRequest.LastIndex > 0);
+            Assert.NotNull(infoRequest.KnownLeader);
 
-            Task.Delay(3000, ct).Wait(ct);
+            Assert.Equal(id, infoRequest.Response.ID);
 
-            var infoRequest = client.Session.Info(id);
-            Assert.IsTrue(infoRequest.LastIndex > 0);
-            Assert.IsNotNull(infoRequest.KnownLeader);
+            Assert.True((await client.Session.Destroy(id)).Response);
 
-            Assert.AreEqual(id, infoRequest.Response.ID);
-
-            Assert.IsTrue(client.Session.Destroy(id).Response);
+            try
+            {
+                renewTask.Wait(10000);
+                Assert.True(false, "timedout: missing session did not terminate renewal loop");
+            }
+            catch (AggregateException ae)
+            {
+                Assert.IsType<SessionExpiredException>(ae.InnerExceptions[0]);
+            }
         }
 
-        [TestMethod]
-        public void Session_Info()
+        [Fact]
+        public async Task Session_Create_RenewPeriodic_TTLExpire()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create();
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create(new SessionEntry() { TTL = TimeSpan.FromSeconds(500) });
+
+            var id = sessionRequest.Response;
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
+
+            var tokenSource = new CancellationTokenSource();
+            var ct = tokenSource.Token;
+
+            try
+            {
+                var renewTask = client.Session.RenewPeriodic(TimeSpan.FromSeconds(1), id, WriteOptions.Default, ct);
+                Assert.True((await client.Session.Destroy(id)).Response);
+                renewTask.Wait(10000);
+            }
+            catch (AggregateException ae)
+            {
+                foreach (var e in ae.InnerExceptions)
+                {
+                    Assert.IsType<SessionExpiredException>(e);
+                }
+                return;
+            }
+            catch (SessionExpiredException ex)
+            {
+                Assert.IsType<SessionExpiredException>(ex);
+                return;
+            }
+            Assert.True(false, "timed out: missing session did not terminate renewal loop");
+        }
+
+        [Fact]
+        public async Task Session_Info()
+        {
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create();
 
             var id = sessionRequest.Response;
 
-            Assert.IsTrue(sessionRequest.RequestTime.TotalMilliseconds > 0);
-            Assert.IsFalse(string.IsNullOrEmpty(sessionRequest.Response));
+            Assert.NotEqual(TimeSpan.Zero, sessionRequest.RequestTime);
+            Assert.False(string.IsNullOrEmpty(sessionRequest.Response));
 
-            var infoRequest = client.Session.Info(id);
-            Assert.IsTrue(infoRequest.LastIndex > 0);
-            Assert.IsNotNull(infoRequest.KnownLeader);
+            var infoRequest = await client.Session.Info(id);
+            Assert.True(infoRequest.LastIndex > 0);
+            Assert.NotNull(infoRequest.KnownLeader);
 
-            Assert.AreEqual(id, infoRequest.Response.ID);
+            Assert.Equal(id, infoRequest.Response.ID);
 
-            Assert.IsTrue(string.IsNullOrEmpty(infoRequest.Response.Name));
-            Assert.IsFalse(string.IsNullOrEmpty(infoRequest.Response.Node));
-            Assert.IsTrue(infoRequest.Response.CreateIndex > 0);
-            Assert.AreEqual(infoRequest.Response.Behavior, SessionBehavior.Release);
+            Assert.True(string.IsNullOrEmpty(infoRequest.Response.Name));
+            Assert.False(string.IsNullOrEmpty(infoRequest.Response.Node));
+            Assert.True(infoRequest.Response.CreateIndex > 0);
+            Assert.Equal(infoRequest.Response.Behavior, SessionBehavior.Release);
 
-            Assert.IsTrue(string.IsNullOrEmpty(infoRequest.Response.Name));
-            Assert.IsNotNull(infoRequest.KnownLeader);
+            Assert.True(string.IsNullOrEmpty(infoRequest.Response.Name));
+            Assert.NotNull(infoRequest.KnownLeader);
 
-            Assert.IsTrue(infoRequest.LastIndex > 0);
-            Assert.IsNotNull(infoRequest.KnownLeader);
+            Assert.True(infoRequest.LastIndex > 0);
+            Assert.NotNull(infoRequest.KnownLeader);
 
-            var destroyRequest = client.Session.Destroy(id);
+            var destroyRequest = await client.Session.Destroy(id);
 
-            Assert.IsTrue(destroyRequest.Response);
+            Assert.True(destroyRequest.Response);
         }
 
-        [TestMethod]
-        public void Session_Node()
+        [Fact]
+        public async Task Session_Node()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create();
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create();
 
             var id = sessionRequest.Response;
             try
             {
-                var infoRequest = client.Session.Info(id);
+                var infoRequest = await client.Session.Info(id);
 
-                var nodeRequest = client.Session.Node(infoRequest.Response.Node);
+                var nodeRequest = await client.Session.Node(infoRequest.Response.Node);
 
-                Assert.AreEqual(nodeRequest.Response.Length, 1);
-                Assert.AreNotEqual(nodeRequest.LastIndex, 0);
-                Assert.IsTrue(nodeRequest.KnownLeader);
+                Assert.Equal(1, nodeRequest.Response.Length);
+                Assert.NotEqual((ulong)0, nodeRequest.LastIndex);
+                Assert.True(nodeRequest.KnownLeader);
             }
             finally
             {
-                var destroyRequest = client.Session.Destroy(id);
+                var destroyRequest = await client.Session.Destroy(id);
 
-                Assert.IsTrue(destroyRequest.Response);
+                Assert.True(destroyRequest.Response);
             }
         }
 
-        [TestMethod]
-        public void Session_List()
+        [Fact]
+        public async Task Session_List()
         {
-            var client = new Client();
-            var sessionRequest = client.Session.Create();
+            var client = new ConsulClient();
+            var sessionRequest = await client.Session.Create();
 
             var id = sessionRequest.Response;
 
             try
             {
-                var listRequest = client.Session.List();
+                var listRequest = await client.Session.List();
 
-                Assert.AreEqual(listRequest.Response.Length, 1);
-                Assert.AreNotEqual(listRequest.LastIndex, 0);
-                Assert.IsTrue(listRequest.KnownLeader);
+                Assert.Equal(1, listRequest.Response.Length);
+                Assert.NotEqual((ulong)0, listRequest.LastIndex);
+                Assert.True(listRequest.KnownLeader);
             }
             finally
             {
-                var destroyRequest = client.Session.Destroy(id);
+                var destroyRequest = await client.Session.Destroy(id);
 
-                Assert.IsTrue(destroyRequest.Response);
+                Assert.True(destroyRequest.Response);
             }
         }
     }

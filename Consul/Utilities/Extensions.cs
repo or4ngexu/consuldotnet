@@ -1,4 +1,22 @@
-﻿using System;
+﻿// -----------------------------------------------------------------------
+//  <copyright file="Health.cs" company="PlayFab Inc">
+//    Copyright 2015 PlayFab Inc.
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+//  </copyright>
+// -----------------------------------------------------------------------
+
+using System;
 using System.Collections.Generic;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -31,37 +49,37 @@ namespace Consul
             {
                 return "0";
             }
-            var outDuration = new StringBuilder();
+
             if (ts.TotalSeconds < 1)
             {
-                outDuration.Append(ts.TotalMilliseconds.ToString("#ms"));
+                return ts.TotalMilliseconds.ToString("#ms");
             }
             else
             {
+                var outDuration = new StringBuilder();
                 if ((int)ts.TotalHours > 0)
                 {
                     outDuration.Append(ts.TotalHours.ToString("#h"));
                 }
-                if ((int)ts.TotalMinutes > 0)
+                if (ts.Minutes > 0)
                 {
-                    outDuration.Append(ts.Minutes.ToString("#m"));
+                    outDuration.Append(ts.ToString("%m'm'"));
                 }
-                if ((int)ts.TotalSeconds > 0)
+                if (ts.Seconds > 0)
                 {
-                    outDuration.Append(ts.Seconds.ToString("#"));
+                    outDuration.Append(ts.ToString("%s"));
                 }
-
                 if (ts.Milliseconds > 0)
                 {
                     outDuration.Append(".");
-                    outDuration.Append(ts.Milliseconds.ToString("#"));
+                    outDuration.Append(ts.ToString("fff"));
                 }
                 if (ts.Seconds > 0)
                 {
                     outDuration.Append("s");
                 }
+                return outDuration.ToString();
             }
-            return outDuration.ToString();
         }
         internal static TimeSpan FromGoDuration(string value)
         {

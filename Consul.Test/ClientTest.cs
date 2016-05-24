@@ -1,32 +1,16 @@
-﻿// -----------------------------------------------------------------------
-//  <copyright file="ClientTest.cs" company="PlayFab Inc">
-//    Copyright 2015 PlayFab Inc.
-//
-//    Licensed under the Apache License, Version 2.0 (the "License");
-//    you may not use this file except in compliance with the License.
-//    You may obtain a copy of the License at
-//
-//        http://www.apache.org/licenses/LICENSE-2.0
-//
-//    Unless required by applicable law or agreed to in writing, software
-//    distributed under the License is distributed on an "AS IS" BASIS,
-//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//    See the License for the specific language governing permissions and
-//    limitations under the License.
-//  </copyright>
-// -----------------------------------------------------------------------
-
-using System;
+﻿using System;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Security;
-using Microsoft.VisualStudio.TestTools.UnitTesting;
+using System.Threading.Tasks;
+using Xunit;
 
 namespace Consul.Test
 {
-    [TestClass]
     public class ClientTest
     {
-        [TestMethod]
+        [Fact]
         public void Client_DefaultConfig_env()
         {
             const string addr = "1.2.3.4:5678";
@@ -40,14 +24,12 @@ namespace Consul.Test
 
             var config = new ConsulClientConfiguration();
 
-            Assert.AreEqual(addr, config.Address);
-            Assert.AreEqual(token, config.Token);
-            Assert.IsNotNull(config.HttpAuth);
-            Assert.AreEqual("username", config.HttpAuth.UserName);
-            Assert.AreEqual("password", config.HttpAuth.Password);
-            Assert.AreEqual("https", config.Scheme);
-            Assert.IsTrue(ServicePointManager.ServerCertificateValidationCallback(null, null, null,
-                SslPolicyErrors.RemoteCertificateChainErrors));
+            Assert.Equal(addr, string.Format("{0}:{1}", config.Address.Host, config.Address.Port));
+            Assert.Equal(token, config.Token);
+            Assert.NotNull(config.HttpAuth);
+            Assert.Equal("username", config.HttpAuth.UserName);
+            Assert.Equal("password", config.HttpAuth.Password);
+            Assert.Equal("https", config.Address.Scheme);
 
             Environment.SetEnvironmentVariable("CONSUL_HTTP_ADDR", string.Empty);
             Environment.SetEnvironmentVariable("CONSUL_HTTP_TOKEN", string.Empty);
@@ -56,15 +38,18 @@ namespace Consul.Test
             Environment.SetEnvironmentVariable("CONSUL_HTTP_SSL_VERIFY", string.Empty);
             ServicePointManager.ServerCertificateValidationCallback = null;
 
-            var client = new Client(config);
+            var client = new ConsulClient(config);
 
-            Assert.IsNotNull(client);
+            Assert.True((client.Handler as WebRequestHandler).ServerCertificateValidationCallback(null, null, null,
+                SslPolicyErrors.RemoteCertificateChainErrors));
+
+            Assert.NotNull(client);
         }
 
-        [TestMethod]
-        public void Client_SetQueryOptions()
+        [Fact]
+        public async Task Client_SetQueryOptions()
         {
-            var client = new Client();
+            var client = new ConsulClient();
             var opts = new QueryOptions()
             {
                 Datacenter = "foo",
@@ -73,26 +58,39 @@ namespace Consul.Test
                 WaitTime = new TimeSpan(0, 0, 100),
                 Token = "12345"
             };
-            var request = client.CreateQuery("/v1/kv/foo", opts);
-            try
-            {
-                request.Execute();
-            }
-            catch (Exception)
-            {
-                // ignored
-            }
-            Assert.AreEqual("foo", request.Params["dc"]);
-            Assert.IsTrue(request.Params.ContainsKey("consistent"));
-            Assert.AreEqual("1000", request.Params["index"]);
-            Assert.AreEqual("1m40s", request.Params["wait"]);
-            Assert.AreEqual("12345", request.Params["token"]);
+            var request = client.Get<KVPair>("/v1/kv/foo", opts);
+
+            await Assert.ThrowsAsync<ConsulRequestException>(async () => await request.Execute());
+
+            Assert.Equal("foo", request.Params["dc"]);
+            Assert.True(request.Params.ContainsKey("consistent"));
+            Assert.Equal("1000", request.Params["index"]);
+            Assert.Equal("1m40s", request.Params["wait"]);
+            Assert.Equal("12345", request.Params["token"]);
         }
 
-        [TestMethod]
-        public void Client_SetWriteOptions()
+        [Fact]
+        public async Task Client_SetClientOptions()
         {
-            var client = new Client();
+            var config = new ConsulClientConfiguration()
+            {
+                Datacenter = "foo",
+                WaitTime = new TimeSpan(0, 0, 100),
+                Token = "12345"
+            };
+            var client = new ConsulClient(config);
+            var request = client.Get<KVPair>("/v1/kv/foo");
+
+            await Assert.ThrowsAsync<ConsulRequestException>(async () => await request.Execute());
+
+            Assert.Equal("foo", request.Params["dc"]);
+            Assert.Equal("1m40s", request.Params["wait"]);
+            Assert.Equal("12345", request.Params["token"]);
+        }
+        [Fact]
+        public async Task Client_SetWriteOptions()
+        {
+            var client = new ConsulClient();
 
             var opts = new WriteOptions()
             {
@@ -100,18 +98,74 @@ namespace Consul.Test
                 Token = "12345"
             };
 
-            var request = client.CreateWrite("/v1/kv/foo", opts);
-            try
+            var request = client.Put("/v1/kv/foo", new KVPair("kv/foo"), opts);
+
+            await Assert.ThrowsAsync<ConsulRequestException>(async () => await request.Execute());
+
+            Assert.Equal("foo", request.Params["dc"]);
+            Assert.Equal("12345", request.Params["token"]);
+        }
+
+        [Fact]
+        public async Task Client_CustomHttpClient()
+        {
+            using (var hc = new HttpClient())
             {
-                request.Execute();
+                hc.Timeout = TimeSpan.FromDays(10);
+                hc.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+                using (var client = new ConsulClient(new ConsulClientConfiguration(), hc))
+                {
+                    await client.KV.Put(new KVPair("customhttpclient") { Value = System.Text.Encoding.UTF8.GetBytes("hello world") });
+                    Assert.Equal(TimeSpan.FromDays(10), client.HttpClient.Timeout);
+                    Assert.True(client.HttpClient.DefaultRequestHeaders.Accept.Contains(new MediaTypeWithQualityHeaderValue("application/json")));
+                }
+                Assert.Equal("hello world", await (await hc.GetAsync("http://localhost:8500/v1/kv/customhttpclient?raw")).Content.ReadAsStringAsync());
             }
-            catch (Exception)
+        }
+
+        [Fact]
+        public async Task Client_DisposeBehavior()
+        {
+            var client = new ConsulClient();
+            var opts = new WriteOptions()
             {
-                // ignored
+                Datacenter = "foo",
+                Token = "12345"
+            };
+
+            client.Dispose();
+
+            var request = client.Put("/v1/kv/foo", new KVPair("kv/foo"), opts);
+
+            await Assert.ThrowsAsync<ObjectDisposedException>(() => request.Execute());
+        }
+
+        [Fact]
+        public async Task Client_ReuseAndUpdateConfig()
+        {
+            var config = new ConsulClientConfiguration();
+
+            using (var client = new ConsulClient(config))
+            {
+                config.DisableServerCertificateValidation = true;
+                await client.KV.Put(new KVPair("kv/reuseconfig") { Flags = 1000 });
+                Assert.Equal<ulong>(1000, (await client.KV.Get("kv/reuseconfig")).Response.Flags);
+                Assert.True((client.Handler as WebRequestHandler).ServerCertificateValidationCallback(null, null, null,
+                    SslPolicyErrors.RemoteCertificateChainErrors));
             }
 
-            Assert.AreEqual("foo", request.Params["dc"]);
-            Assert.AreEqual("12345", request.Params["token"]);
+            using (var client = new ConsulClient(config))
+            {
+                config.DisableServerCertificateValidation = false;
+                await client.KV.Put(new KVPair("kv/reuseconfig") { Flags = 2000 });
+                Assert.Equal<ulong>(2000, (await client.KV.Get("kv/reuseconfig")).Response.Flags);
+                Assert.Null((client.Handler as WebRequestHandler).ServerCertificateValidationCallback);
+            }
+
+            using (var client = new ConsulClient(config))
+            {
+                await client.KV.Delete("kv/reuseconfig");
+            }
         }
     }
 }

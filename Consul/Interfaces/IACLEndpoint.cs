@@ -1,22 +1,24 @@
 ﻿using System;
 using System.Threading;
+using System.Threading.Tasks;
+
 namespace Consul
 {
     public interface IACLEndpoint
     {
-        WriteResult<string> Clone(string id);
-        WriteResult<string> Clone(string id, WriteOptions q);
-        WriteResult<string> Create(ACLEntry acl);
-        WriteResult<string> Create(ACLEntry acl, WriteOptions q);
-        WriteResult<bool> Destroy(string id);
-        WriteResult<bool> Destroy(string id, WriteOptions q);
-        QueryResult<ACLEntry> Info(string id);
-        QueryResult<ACLEntry> Info(string id, QueryOptions q);
-        QueryResult<ACLEntry> Info(string id, QueryOptions q, CancellationToken ct);
-        QueryResult<ACLEntry[]> List();
-        QueryResult<ACLEntry[]> List(QueryOptions q);
-        QueryResult<ACLEntry[]> List(QueryOptions q, CancellationToken ct);
-        WriteResult Update(ACLEntry acl);
-        WriteResult Update(ACLEntry acl, WriteOptions q);
+        Task<WriteResult<string>> Clone(string id);
+        Task<WriteResult<string>> Clone(string id, WriteOptions q);
+        Task<WriteResult<string>> Create(ACLEntry acl);
+        Task<WriteResult<string>> Create(ACLEntry acl, WriteOptions q);
+        Task<WriteResult<bool>> Destroy(string id);
+        Task<WriteResult<bool>> Destroy(string id, WriteOptions q);
+        Task<QueryResult<ACLEntry>> Info(string id);
+        Task<QueryResult<ACLEntry>> Info(string id, QueryOptions q);
+        Task<QueryResult<ACLEntry>> Info(string id, QueryOptions q, CancellationToken ct);
+        Task<QueryResult<ACLEntry[]>> List();
+        Task<QueryResult<ACLEntry[]>> List(QueryOptions q);
+        Task<QueryResult<ACLEntry[]>> List(QueryOptions q, CancellationToken ct);
+        Task<WriteResult> Update(ACLEntry acl);
+        Task<WriteResult> Update(ACLEntry acl, WriteOptions q);
     }
 }
