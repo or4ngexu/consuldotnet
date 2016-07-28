@@ -13,6 +13,19 @@
 * `ConsulClient` is now `IDisposable` and should have `Dispose()` called to
   clean it up. It is still supposed to be used in a long-lived fashion, though.
 
+## 2016-06-10
+* Correct the behavior of `LockTryOnce/SemaphoreTryOnce` so that it now
+  properly waits one multiple of the WaitTime before exiting in case of it
+  already being held.
+
+## 2016-05-27
+* Disable Client Certificates on Mono since the certificate handler is
+  not implemented at the Mono library level.
+
+## 2016-05-24
+* Added missing CancellationToken overrides to allow long polling for
+  `Catalog.Node()` and `Catalog.Service()`.
+
 ## 2016-05-16
 * Fixed configuration reuse between multiple clients so multiple
   `ConsulClient`s that exist one after the other that both reference the same
